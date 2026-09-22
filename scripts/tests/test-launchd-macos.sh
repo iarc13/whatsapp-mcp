@@ -214,6 +214,7 @@ test_install_preserves_optional_env_values() {
     WHATSAPP_BRIDGE_PORT="9090" \
     WEBHOOK_URL="http://127.0.0.1:8769/whatsapp/webhook" \
     WEBHOOK_ENABLED="false" \
+    WHATSAPP_AUTO_DOWNLOAD_MEDIA="false" \
     FORWARD_SELF="true" \
     WHATSAPP_BRIDGE_TOKEN="test token with spaces" \
     WHATSAPP_MEDIA_ROOTS="/tmp/outbox:/tmp/other outbox" \
@@ -225,6 +226,7 @@ test_install_preserves_optional_env_values() {
   assert_contains "$support/launchd.env" "export WHATSAPP_API_URL='http://127.0.0.1:9090/api'"
   assert_contains "$support/launchd.env" "export WEBHOOK_URL='http://127.0.0.1:8769/whatsapp/webhook'"
   assert_contains "$support/launchd.env" "export WEBHOOK_ENABLED='false'"
+  assert_contains "$support/launchd.env" "export WHATSAPP_AUTO_DOWNLOAD_MEDIA='false'"
   assert_contains "$support/launchd.env" "export FORWARD_SELF='true'"
   assert_contains "$support/launchd.env" "export WHATSAPP_BRIDGE_TOKEN='test token with spaces'"
   assert_contains "$support/launchd.env" "export WHATSAPP_MEDIA_ROOTS='/tmp/outbox:/tmp/other outbox'"

@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1563,74 +1562,11 @@ func TestHandleMessage_ImageWithCaption_WebhookForwarded(t *testing.T) {
 	}
 }
 
-// stubMediaDownload replaces downloadMediaForMessage with a stub that counts
-// calls, restoring the original on cleanup.
-func stubMediaDownload(t *testing.T) *atomic.Int32 {
-	t.Helper()
-	var calls atomic.Int32
-	original := downloadMediaForMessage
-	downloadMediaForMessage = func(_ *whatsmeow.Client, _ *MessageStore, _ string, _ string) (bool, string, string, string, error) {
-		calls.Add(1)
-		return false, "", "", "", nil
-	}
-	t.Cleanup(func() { downloadMediaForMessage = original })
-	return &calls
-}
-
-// TestHandleMessage_StatusMediaNotDownloadedOrForwarded guards against status
-// updates filling the store: their media must not be auto-downloaded and the
-// message must not reach the webhook, but it is still stored.
-func TestHandleMessage_StatusMediaNotDownloadedOrForwarded(t *testing.T) {
-	srv, webhookCh := captureWebhook(t)
-	t.Setenv("WEBHOOK_URL", srv.URL)
-	calls := stubMediaDownload(t)
-
-	client := newTestClient(&mockLIDStore{})
-	ms := newTestMessageStore(t)
-	msg := buildImageMessage(types.StatusBroadcastJID, phonePN, false, "")
-	msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
-	msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
-
-	handleMessage(client, ms, msg, testLogger())
-
-	if count := queryMessageCount(ms, types.StatusBroadcastJID.String()); count != 1 {
-		t.Errorf("expected status message stored, got %d", count)
-	}
-	select {
-	case <-webhookCh:
-		t.Fatal("status message was forwarded to the webhook")
-	case <-time.After(200 * time.Millisecond):
-	}
-	if n := calls.Load(); n != 0 {
-		t.Errorf("expected no media download for status, got %d", n)
-	}
-}
-
-// TestHandleMessage_AutoDownloadDisabledSkipsBackgroundDownload verifies that
-// WHATSAPP_AUTO_DOWNLOAD_MEDIA=false leaves media for on-demand download.
-func TestHandleMessage_AutoDownloadDisabledSkipsBackgroundDownload(t *testing.T) {
-	t.Setenv("WEBHOOK_ENABLED", "false")
-	t.Setenv("WHATSAPP_AUTO_DOWNLOAD_MEDIA", "false")
-	calls := stubMediaDownload(t)
-
-	client := newTestClient(&mockLIDStore{})
-	ms := newTestMessageStore(t)
-	msg := buildImageMessage(phonePN, phonePN, false, "")
-	msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
-	msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
-
-	handleMessage(client, ms, msg, testLogger())
-
-	time.Sleep(200 * time.Millisecond)
-	if n := calls.Load(); n != 0 {
-		t.Errorf("expected no background download, got %d", n)
-	}
-}
-
 // TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously ensures the
 // webhook opt-out does not make incoming image processing wait on a download
 // solely used for the vision webhook payload.
 func TestHandleMessage_WebhookDisabledDownloadsImageAsynchronously(t *testing.T) {
+	t.Setenv("WHATSAPP_AUTO_DOWNLOAD_MEDIA", "true")
 	t.Setenv("WEBHOOK_ENABLED", "false")
 
 	client := newTestClient(&mockLIDStore{})

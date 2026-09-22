@@ -43,8 +43,8 @@ import (
 // Defaults to true. Override with env FORWARD_SELF=false.
 var forwardSelfMessages = getEnvBool("FORWARD_SELF", true)
 
-// autoDownloadMediaEnabled reports whether incoming media is downloaded in the
-// background as it arrives. WHATSAPP_AUTO_DOWNLOAD_MEDIA=false leaves media to
+// autoDownloadMediaEnabled reports whether incoming media is downloaded
+// automatically, including images for webhooks. A false value leaves media to
 // on-demand /api/download calls. Read per call so tests can toggle it.
 func autoDownloadMediaEnabled() bool {
 	return getEnvBool("WHATSAPP_AUTO_DOWNLOAD_MEDIA", true)
@@ -1884,6 +1884,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
+	// Status updates are stored but never forwarded or auto-downloaded.
+	isStatus := msg.Info.Chat == types.StatusBroadcastJID
+	shouldForward := !isStatus && webhooksEnabled() && (forwardSelfMessages || !msg.Info.IsFromMe)
+
 	// Reactions arrive as their own message stanza rather than message content.
 	// Persist them in the messages table as media_type="reaction", with the
 	// emoji in `content` and the reacted-to message ID in `filename`, then
@@ -1904,7 +1908,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			); err != nil {
 				logger.Warnf("Failed to store reaction: %v", err)
 			}
-			if forwardSelfMessages || !msg.Info.IsFromMe {
+			if shouldForward {
 				SendReactionWebhook(sender, chatJID, msg.Info.IsFromMe, msg.Info.ID, reactedToID, emoji)
 			}
 		}
@@ -1959,21 +1963,14 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		}
 	}
 
-	// Avoid webhook-only image work when no webhook will receive the message. Media
-	// still downloads asynchronously in that case so it remains available to MCP
-	// tools, but message handling never blocks on a disabled outbound webhook.
-	// Status updates (status@broadcast) are stored but never forwarded or
-	// auto-downloaded: their media is large, expires within a day, and would
-	// otherwise dominate the store directory.
-	isStatus := msg.Info.Chat == types.StatusBroadcastJID
-	shouldForward := !isStatus && webhooksEnabled() && (forwardSelfMessages || !msg.Info.IsFromMe)
+	// The opt-out covers every implicit download, including webhook images.
+	shouldDownload := !isStatus && autoDownloadMediaEnabled()
 
-	// For image messages that will be forwarded, download media synchronously so we
-	// can include the base64 payload in the webhook. Other media types (and images
-	// when webhook forwarding is disabled) download asynchronously for caching.
+	// Forwarded images download synchronously to include bytes in the webhook.
+	// Other media downloads asynchronously for caching when downloads are enabled.
 	var imageDownloadPath string
 	var imageMimeType string
-	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward {
+	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward && shouldDownload {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
 		success, _, _, dlPath, dlErr := downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
 		if success && dlErr == nil {
@@ -1994,23 +1991,21 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		} else {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to async download so media is cached for future MCP tool calls
-			if autoDownloadMediaEnabled() {
-				go func() {
-					_, _, _, _, _ = downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
-				}()
-			}
+			scheduleMediaDownload(func() {
+				_, _, _, _, _ = downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
+			})
 		}
-	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && !isStatus && autoDownloadMediaEnabled() {
+	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && shouldDownload {
 		// Media that is not included in a webhook payload: async download for caching.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
-		go func() {
+		scheduleMediaDownload(func() {
 			success, _, _, downloadPath, err := downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
 			if success && err == nil {
 				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
 			} else {
 				logger.Warnf("❌ Auto-download failed: %v", err)
 			}
-		}()
+		})
 	}
 
 	// Send webhook for incoming messages.
@@ -2256,6 +2251,10 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 // downloadMediaForMessage allows message-handling tests to verify whether a
 // download blocks event processing without changing production behavior.
 var downloadMediaForMessage = downloadMedia
+
+// scheduleMediaDownload launches background caching work. Keeping the launch
+// separate lets tests verify whether work was scheduled without timing sleeps.
+var scheduleMediaDownload = func(download func()) { go download() }
 
 // Extract direct path from a WhatsApp media URL
 func extractDirectPathFromURL(url string) string {
