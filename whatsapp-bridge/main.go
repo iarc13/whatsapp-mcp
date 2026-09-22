@@ -1989,21 +1989,21 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		} else {
 			logger.Warnf("❌ Image download failed: %v", dlErr)
 			// Fall back to async download so media is cached for future MCP tool calls
-			go func() {
+			scheduleMediaDownload(func() {
 				_, _, _, _, _ = downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
-			}()
+			})
 		}
 	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && stored {
 		// Media that is not included in a webhook payload: async download for caching.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
-		go func() {
+		scheduleMediaDownload(func() {
 			success, _, _, downloadPath, err := downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
 			if success && err == nil {
 				logger.Infof("✅ Auto-downloaded media: %s", downloadPath)
 			} else {
 				logger.Warnf("❌ Auto-download failed: %v", err)
 			}
-		}()
+		})
 	}
 
 	// Send webhook for incoming messages.
@@ -2249,6 +2249,10 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 // downloadMediaForMessage allows message-handling tests to verify whether a
 // download blocks event processing without changing production behavior.
 var downloadMediaForMessage = downloadMedia
+
+// scheduleMediaDownload launches background caching work. Keeping the launch
+// separate lets tests verify whether work was scheduled without timing sleeps.
+var scheduleMediaDownload = func(download func()) { go download() }
 
 // Extract direct path from a WhatsApp media URL
 func extractDirectPathFromURL(url string) string {
