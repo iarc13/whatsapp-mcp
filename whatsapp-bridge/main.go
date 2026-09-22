@@ -1969,7 +1969,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Forwarded images download synchronously to include bytes in the webhook.
 	// Other media downloads asynchronously for caching when downloads are enabled.
 	var imageDownloadPath string
-	var imageMimeType string
+	imageMimeType := msg.Message.GetImageMessage().GetMimetype()
 	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward && shouldDownload {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
 		success, _, _, dlPath, dlErr := downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)

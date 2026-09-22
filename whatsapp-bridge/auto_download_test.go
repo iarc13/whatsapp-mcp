@@ -40,6 +40,7 @@ func mediaControlMessage(kind string, chat types.JID) *events.Message {
 	if kind == "image" {
 		msg.Message.ImageMessage.URL = proto.String("https://example.invalid/image")
 		msg.Message.ImageMessage.MediaKey = []byte("test-media-key")
+		msg.Message.ImageMessage.Mimetype = proto.String("image/png")
 	} else {
 		msg.Message = &waProto.Message{DocumentMessage: &waProto.DocumentMessage{
 			Caption:  proto.String("attachment caption"),
@@ -106,11 +107,13 @@ func TestHandleMessage_AutomaticMediaControls(t *testing.T) {
 					if payload.MediaType != "image" || payload.MessageID != msg.Info.ID || payload.MediaFilename == "" {
 						t.Error("image webhook lost attachment metadata")
 					}
+					wantMIME := "image/png"
 					if tc.wantCalls > 0 && !tc.failFirst {
 						wantBase64 = base64.StdEncoding.EncodeToString(imageBytes)
-						if payload.MimeType != "image/jpeg" {
-							t.Errorf("image MIME type = %q", payload.MimeType)
-						}
+						wantMIME = "image/jpeg" // Downloaded bytes override the declared type.
+					}
+					if payload.MimeType != wantMIME {
+						t.Errorf("image MIME type = %q, want %q", payload.MimeType, wantMIME)
 					}
 				}
 				if payload.MediaBase64 != wantBase64 {
