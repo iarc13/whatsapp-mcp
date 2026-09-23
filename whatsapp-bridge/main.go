@@ -2031,8 +2031,14 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 		fileLength,
 		quotedMessageId,
 	)
-	if err != nil {
-		logger.Warnf("Failed to store message: %v", err)
+	stored := err == nil
+	if !stored {
+		// The row is what /api/download, get_message_context and mark-read key
+		// on; without it the message exists only downstream. Still forward the
+		// webhook so the text isn't lost, but say so loudly and skip media
+		// downloads, which look the row up by ID and would only fail again.
+		logger.Errorf("Failed to store message %s in %s (webhook still sent, media not downloaded): %v",
+			msg.Info.ID, chatJID, err)
 	}
 
 	var quotedIsFromMe *bool
@@ -2051,7 +2057,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	// Other media downloads asynchronously for caching when downloads are enabled.
 	var imageDownloadPath string
 	imageMimeType := msg.Message.GetImageMessage().GetMimetype()
-	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward && shouldDownload {
+	if mediaType == "image" && url != "" && len(mediaKey) > 0 && shouldForward && stored && shouldDownload {
 		logger.Infof("Downloading image media for message %s (synchronous)", msg.Info.ID)
 		success, _, _, dlPath, dlErr := downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
 		if success && dlErr == nil {
@@ -2076,7 +2082,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 				_, _, _, _, _ = downloadMediaForMessage(client, messageStore, msg.Info.ID, chatJID)
 			})
 		}
-	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && shouldDownload {
+	} else if mediaType != "" && url != "" && len(mediaKey) > 0 && stored && shouldDownload {
 		// Media that is not included in a webhook payload: async download for caching.
 		logger.Infof("Auto-downloading %s media for message %s", mediaType, msg.Info.ID)
 		scheduleMediaDownload(func() {
