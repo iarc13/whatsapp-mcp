@@ -1716,11 +1716,15 @@ func resolveLIDChat(client *whatsmeow.Client, chat, senderAlt, recipientAlt type
 		return alt
 	}
 
-	// Fallback: query the whatsmeow LID-PN mapping store.
-	pn, err := client.Store.LIDs.GetPNForLID(context.Background(), chat)
-	if err == nil && !pn.IsEmpty() {
-		fmt.Printf("Resolved LID chat %s -> %s (from LID store)\n", chat, pn.ToNonAD())
-		return pn.ToNonAD()
+	// Fallback: query the whatsmeow LID-PN mapping store. Guarded like
+	// resolveUserJID so a client without a store (tests, early startup)
+	// degrades to the unresolved LID instead of a nil dereference.
+	if client != nil && client.Store != nil && client.Store.LIDs != nil {
+		pn, err := client.Store.LIDs.GetPNForLID(context.Background(), chat)
+		if err == nil && !pn.IsEmpty() {
+			fmt.Printf("Resolved LID chat %s -> %s (from LID store)\n", chat, pn.ToNonAD())
+			return pn.ToNonAD()
+		}
 	}
 
 	fmt.Printf("Warning: could not resolve LID chat %s to phone JID\n", chat)
@@ -2021,7 +2025,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 				msg.Info.ID, mediaType, imageMimeType, filename, imageDownloadPath,
 			)
 		} else {
-			SendWebhook(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs)
+			SendWebhookWithMessageID(sender, content, chatJID, msg.Info.IsFromMe, quotedMessageId, quotedSender, quotedContent, quotedIsFromMe, mentionedJIDs, msg.Info.ID)
 		}
 	}
 
