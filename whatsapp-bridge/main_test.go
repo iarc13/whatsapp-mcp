@@ -1494,6 +1494,31 @@ func captureRawWebhook(t *testing.T) (*httptest.Server, <-chan map[string]any) {
 	return srv, ch
 }
 
+// TestHandleMessage_TextWebhookPreservesIncomingMessageID verifies the text
+// message handler forwards the native incoming ID for receiver-side
+// idempotency, rather than only testing the lower-level webhook serializer.
+func TestHandleMessage_TextWebhookPreservesIncomingMessageID(t *testing.T) {
+	srv, webhookCh := captureWebhook(t)
+	t.Setenv("WEBHOOK_URL", srv.URL)
+
+	client := newTestClient(&mockLIDStore{})
+	ms := newTestMessageStore(t)
+	logger := testLogger()
+	msg := buildTextMessage(phonePN, phonePN, types.EmptyJID, types.EmptyJID, false, "text webhook")
+	msg.Info.ID = "text-webhook-msg-220"
+
+	handleMessage(client, ms, msg, logger)
+
+	select {
+	case payload := <-webhookCh:
+		if payload.MessageID != msg.Info.ID {
+			t.Errorf("messageId = %q, want incoming ID %q", payload.MessageID, msg.Info.ID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for text webhook call")
+	}
+}
+
 // TestHandleMessage_ImageOnly_WebhookForwarded verifies that an image message
 // with no text caption is forwarded to the webhook endpoint (not silently
 // dropped), and that the webhook payload contains the expected media fields.
@@ -2766,6 +2791,7 @@ func TestNewMessageStoreCreatesMessagesChatJIDIndex(t *testing.T) {
 		t.Fatalf("NewMessageStore() failed: %v", err)
 	}
 	defer func() { _ = ms.Close() }()
+	assertPermissionBits(t, "store", 0o700)
 
 	var count int
 	if err := ms.db.QueryRow(
@@ -2775,6 +2801,115 @@ func TestNewMessageStoreCreatesMessagesChatJIDIndex(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected idx_messages_chat_jid to exist, found %d", count)
+	}
+}
+
+func TestEnsureOwnerOnlyDirectoryLeavesExistingPermissionsUntouched(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "existing")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatalf("create existing directory: %v", err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatalf("set existing directory permissions: %v", err)
+	}
+
+	if err := ensureOwnerOnlyDirectory(path); err != nil {
+		t.Fatalf("ensureOwnerOnlyDirectory(%q): %v", path, err)
+	}
+	assertPermissionBits(t, path, 0o755)
+}
+
+func TestMediaDownloadStorePathsPreserveStandardJIDs(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	timestamp := time.Date(2026, time.September, 23, 12, 0, 0, 0, time.UTC)
+
+	for _, chatJID := range []string{
+		"15551234567@s.whatsapp.net",
+		"123456789@lid",
+		"120363000000000000@g.us",
+	} {
+		t.Run(chatJID, func(t *testing.T) {
+			chatDir, mediaPath, filename, err := mediaDownloadStorePaths(chatJID, "image", "media-message", timestamp)
+			if err != nil {
+				t.Fatalf("mediaDownloadStorePaths() error: %v", err)
+			}
+			if want := filepath.Join(root, "store", chatJID); chatDir != want {
+				t.Fatalf("chat directory = %q, want %q", chatDir, want)
+			}
+			if want := filepath.Join(chatDir, "image_20260923_120000_media-message.jpg"); mediaPath != want || filename != filepath.Base(want) {
+				t.Fatalf("media path = (%q, %q), want (%q, %q)", mediaPath, filename, want, filepath.Base(want))
+			}
+		})
+	}
+}
+
+func TestMediaDownloadStorePathsRejectTraversalIdentifiers(t *testing.T) {
+	t.Chdir(t.TempDir())
+	timestamp := time.Date(2026, time.September, 23, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name      string
+		chatJID   string
+		messageID string
+	}{
+		{name: "chat parent traversal", chatJID: "../outside", messageID: "media-message"},
+		{name: "chat absolute path", chatJID: "/tmp/outside", messageID: "media-message"},
+		{name: "message parent traversal", chatJID: "15551234567@s.whatsapp.net", messageID: "../outside"},
+		{name: "message nested traversal", chatJID: "15551234567@s.whatsapp.net", messageID: "nested/../../outside"},
+		{name: "message windows traversal", chatJID: "15551234567@s.whatsapp.net", messageID: `..\\outside`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, _, err := mediaDownloadStorePaths(tc.chatJID, "image", tc.messageID, timestamp); err == nil {
+				t.Fatal("expected traversal identifier to be rejected")
+			}
+		})
+	}
+}
+
+func TestDownloadMediaCreatesOwnerOnlyMediaPath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	messageStore := newTestMessageStore(t)
+	chatJID := "15551234567@s.whatsapp.net"
+	messageID := "media-message"
+	timestamp := time.Date(2026, time.September, 23, 12, 0, 0, 0, time.UTC)
+	if err := messageStore.StoreChat(chatJID, "", timestamp); err != nil {
+		t.Fatalf("store chat: %v", err)
+	}
+	if err := messageStore.StoreMessage(
+		messageID, chatJID, "15557654321@s.whatsapp.net", "", timestamp, false,
+		"image", "", "https://example.invalid/media", []byte("media-key"),
+		make([]byte, 32), make([]byte, 32), 1, "",
+	); err != nil {
+		t.Fatalf("store media message: %v", err)
+	}
+
+	originalDownload := downloadMediaData
+	downloadMediaData = func(_ *whatsmeow.Client, _ *MediaDownloader) ([]byte, error) {
+		return []byte("private media"), nil
+	}
+	t.Cleanup(func() { downloadMediaData = originalDownload })
+
+	success, _, _, mediaPath, err := downloadMedia(nil, messageStore, messageID, chatJID)
+	if err != nil {
+		t.Fatalf("downloadMedia() failed: %v", err)
+	}
+	if !success {
+		t.Fatal("downloadMedia() returned success=false")
+	}
+
+	assertPermissionBits(t, filepath.Join("store", chatJID), 0o700)
+	assertPermissionBits(t, mediaPath, 0o600)
+}
+
+func assertPermissionBits(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %q: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("permissions for %q = %04o, want %04o", path, got, want)
 	}
 }
 
